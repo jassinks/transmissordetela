@@ -21,7 +21,7 @@
         .status {
             display: inline-flex; align-items: center; gap: 8px;
             background: #242424; padding: 8px 14px; border-radius: 999px;
-            font-size: 13px; font-weight: 700; margin-bottom: 16px;
+            font-size: 13px; font-weight: 700; margin-bottom: 20px;
         }
         .ponto { width: 10px; height: 10px; border-radius: 50%; background: #888; }
         .ponto.pronto { background: #2fff00; }
@@ -30,7 +30,7 @@
         @keyframes piscar { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
 
         #box-audio {
-            display: none; margin-bottom: 18px; padding: 10px 12px;
+            display: none; margin-bottom: 16px; padding: 10px 12px;
             border-radius: 10px; background: #111; border: 1px solid #2c2c2c;
             text-align: left; font-size: 12px;
         }
@@ -51,8 +51,10 @@
             background: #007a08; text-transform: uppercase; letter-spacing: 0.5px;
             transition: background 0.2s, transform 0.1s;
         }
+        button:hover { background: #00940a; }
         button:active { transform: scale(0.98); }
         button.ao-vivo { background: #c62828; }
+        button.ao-vivo:hover { background: #d32f2f; }
         button:disabled { background: #333; color: #777; cursor: not-allowed; }
 
         .dica {
@@ -72,4 +74,232 @@
             <span id="texto-status">Pronto para transmitir</span>
         </div>
 
-        <div id
+        <div id="box-audio">
+            <div id="texto-audio">🔊 Áudio capturado</div>
+            <div class="vu-trilha"><div id="vu-barra"></div></div>
+        </div>
+
+        <button id="btn-transmitir">▶ Compartilhar Tela + Áudio</button>
+
+        <div class="dica" id="box-dica">
+            <strong>Importante:</strong> Escolha a <strong>Tela inteira</strong> (ou a guia do Meet) e deixe ligada a opção <strong>"Compartilhar áudio do sistema"</strong>.
+        </div>
+    </div>
+
+    <script>
+        const SALA_URL = "https://votacao-bc712-default-rtdb.firebaseio.com/telaobs";
+
+        const btn = document.getElementById('btn-transmitir');
+        const textoStatus = document.getElementById('texto-status');
+        const ponto = document.getElementById('ponto');
+        const boxDica = document.getElementById('box-dica');
+        const boxAudio = document.getElementById('box-audio');
+        const textoAudio = document.getElementById('texto-audio');
+        const vuBarra = document.getElementById('vu-barra');
+
+        const rtcConfig = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun.relay.metered.ca:80' },
+                { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+                { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+                { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
+            ]
+        };
+
+        let pc = null;
+        let streamAtual = null;
+        let timerResposta = null;
+        let audioCtx = null;
+        let animVu = null;
+
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+            btn.disabled = true;
+            btn.textContent = 'Indisponível em celulares';
+            textoStatus.textContent = 'Use em um computador';
+            ponto.className = 'ponto';
+            boxDica.innerHTML = '<strong>Aviso:</strong> Navegadores de celular bloqueiam compartilhamento de tela por site.';
+        }
+
+        function pararMonitorAudio() {
+            if (animVu) { cancelAnimationFrame(animVu); animVu = null; }
+            if (audioCtx) { try { audioCtx.close(); } catch (e) {} audioCtx = null; }
+            boxAudio.style.display = 'none';
+            boxAudio.classList.remove('sem-audio');
+            vuBarra.style.width = '0%';
+        }
+
+        function iniciarMonitorAudio(stream) {
+            pararMonitorAudio();
+            boxAudio.style.display = 'block';
+            const audioTracks = stream.getAudioTracks();
+
+            if (!audioTracks || audioTracks.length === 0) {
+                boxAudio.classList.add('sem-audio');
+                textoAudio.innerHTML = '⚠️ <strong>SEM ÁUDIO!</strong> Encerre e marque "Compartilhar áudio do sistema".';
+                vuBarra.style.width = '0%';
+                return;
+            }
+
+            textoAudio.innerHTML = '🔊 <strong>Áudio ativo</strong> (tocando no HDMI e enviando ao OBS)';
+            try {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                const source = audioCtx.createMediaStreamSource(new MediaStream([audioTracks[0]]));
+                const analyser = audioCtx.createAnalyser();
+                analyser.fftSize = 256;
+                source.connect(analyser);
+                const data = new Uint8Array(analyser.frequencyBinCount);
+
+                const atualizar = () => {
+                    analyser.getByteTimeDomainData(data);
+                    let pico = 0;
+                    for (let i = 0; i < data.length; i++) {
+                        const v = Math.abs(data[i] - 128);
+                        if (v > pico) pico = v;
+                    }
+                    const pct = Math.min(100, Math.round((pico / 64) * 100));
+                    vuBarra.style.width = pct + '%';
+                    animVu = requestAnimationFrame(atualizar);
+                };
+                atualizar();
+            } catch (e) {}
+        }
+
+        function aguardarIce(peerConnection) {
+            return new Promise((resolve) => {
+                if (peerConnection.iceGatheringState === 'complete') return resolve();
+                const timeout = setTimeout(resolve, 4000);
+                peerConnection.onicegatheringstatechange = () => {
+                    if (peerConnection.iceGatheringState === 'complete') {
+                        clearTimeout(timeout);
+                        resolve();
+                    }
+                };
+            });
+        }
+
+        async function encerrarTransmissao() {
+            pararMonitorAudio();
+            if (timerResposta) { clearInterval(timerResposta); timerResposta = null; }
+            if (pc) { try { pc.close(); } catch (e) {} pc = null; }
+            if (streamAtual) {
+                streamAtual.getTracks().forEach(t => t.stop());
+                streamAtual = null;
+            }
+            fetch(`${SALA_URL}.json`, { method: 'DELETE' }).catch(() => {});
+
+            textoStatus.textContent = 'Pronto para transmitir';
+            ponto.className = 'ponto pronto';
+            btn.textContent = '▶ Compartilhar Tela + Áudio';
+            btn.classList.remove('ao-vivo');
+        }
+
+        btn.onclick = async () => {
+            if (streamAtual) {
+                await encerrarTransmissao();
+                return;
+            }
+
+            try {
+                streamAtual = await navigator.mediaDevices.getDisplayMedia({
+                    video: {
+                        width: { ideal: 1920 },
+                        height: { ideal: 1080 },
+                        frameRate: { ideal: 30, max: 30 }
+                    },
+                    audio: {
+                        echoCancellation: false,
+                        noiseSuppression: false,
+                        autoGainControl: false,
+                        suppressLocalAudioPlayback: false
+                    },
+                    systemAudio: "include"
+                });
+
+                streamAtual.getVideoTracks()[0].onended = () => encerrarTransmissao();
+                iniciarMonitorAudio(streamAtual);
+
+                textoStatus.textContent = 'Buscando rota de rede...';
+                ponto.className = 'ponto aguardando';
+                btn.textContent = '✖ Encerrar Transmissão';
+                btn.classList.add('ao-vivo');
+
+                pc = new RTCPeerConnection(rtcConfig);
+
+                streamAtual.getTracks().forEach(track => {
+                    const sender = pc.addTrack(track, streamAtual);
+                    if (track.kind === 'video') {
+                        setTimeout(async () => {
+                            try {
+                                const params = sender.getParameters();
+                                if (!params.encodings) params.encodings = [{}];
+                                params.encodings[0].maxBitrate = 4000000;
+                                await sender.setParameters(params);
+                            } catch (e) {}
+                        }, 1000);
+                    }
+                });
+
+                pc.onconnectionstatechange = () => {
+                    if (!pc) return;
+                    if (pc.connectionState === 'connected') {
+                        textoStatus.textContent = 'NO AR (OBS CONECTADO)';
+                        ponto.className = 'ponto no-ar';
+                    } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+                        textoStatus.textContent = 'Sinal interrompido — clique para tentar novamente';
+                        ponto.className = 'ponto aguardando';
+                    }
+                };
+
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                await aguardarIce(pc);
+
+                textoStatus.textContent = 'Aguardando resposta do OBS...';
+
+                const ts = Date.now();
+                await fetch(`${SALA_URL}.json`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        offer: {
+                            type: pc.localDescription.type,
+                            sdp: pc.localDescription.sdp,
+                            ts: ts
+                        },
+                        answer: null
+                    })
+                });
+
+                timerResposta = setInterval(async () => {
+                    if (!pc || pc.currentRemoteDescription) {
+                        clearInterval(timerResposta);
+                        timerResposta = null;
+                        return;
+                    }
+                    try {
+                        const res = await fetch(`${SALA_URL}/answer.json?t=${Date.now()}`);
+                        const ans = await res.json();
+                        if (ans && ans.ts === ts && ans.sdp && pc && !pc.currentRemoteDescription) {
+                            clearInterval(timerResposta);
+                            timerResposta = null;
+                            textoStatus.textContent = 'Fechando conexão de vídeo...';
+                            await pc.setRemoteDescription(new RTCSessionDescription({ type: ans.type, sdp: ans.sdp }));
+                        }
+                    } catch (e) {}
+                }, 1000);
+
+            } catch (err) {
+                await encerrarTransmissao();
+                textoStatus.textContent = 'Compartilhamento cancelado';
+            }
+        };
+
+        window.addEventListener('beforeunload', () => {
+            if (streamAtual) {
+                fetch(`${SALA_URL}.json`, { method: 'DELETE', keepalive: true }).catch(() => {});
+            }
+        });
+    </script>
+</body>
+</html>
