@@ -4,7 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Transmissor de Tela - OBS</title>
-    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
     <style>
         * { box-sizing: border-box; }
         body {
@@ -26,6 +27,7 @@
         }
         .ponto { width: 10px; height: 10px; border-radius: 50%; background: #888; }
         .ponto.pronto { background: #2fff00; }
+        .ponto.aguardando { background: #ffaa00; }
         .ponto.no-ar { background: #ff2a2a; animation: piscar 1.2s infinite; }
         @keyframes piscar { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
 
@@ -52,100 +54,68 @@
         <p>Envie a tela e o áudio deste computador direto para o OBS Studio.</p>
 
         <div class="status">
-            <span class="ponto" id="ponto"></span>
-            <span id="texto-status">Conectando servidor...</span>
+            <span class="ponto pronto" id="ponto"></span>
+            <span id="texto-status">Pronto para transmitir</span>
         </div>
 
         <button id="btn-transmitir">▶ Compartilhar Tela + Áudio</button>
 
         <div class="dica" id="box-dica">
-            <strong>Importante:</strong> Na janela que abrir, escolha a tela inteira e marque a opção <strong>"Compartilhar áudio do sistema"</strong>. Não minimize esta janela depois de iniciar.
+            <strong>Importante:</strong> Escolha a tela inteira e marque <strong>"Compartilhar áudio do sistema"</strong>. Não minimize esta janela depois de iniciar.
         </div>
     </div>
 
     <script>
-        // Use a mesma chave do seu receptor de tela do OBS
-        const CHAVE_OBS = 'obs-otacilio-receptor-master';
+        // COLE AQUI A URL DO SEU FIREBASE REALTIME DATABASE
+        const FIREBASE_DB_URL = "https://SEU-PROJETO-default-rtdb.firebaseio.com";
+        const SALA = "transmissao_tela_obs";
+
+        firebase.initializeApp({ databaseURL: FIREBASE_DB_URL });
+        const db = firebase.database();
+        const salaRef = db.ref(SALA);
 
         const btn = document.getElementById('btn-transmitir');
         const textoStatus = document.getElementById('texto-status');
         const ponto = document.getElementById('ponto');
         const boxDica = document.getElementById('box-dica');
 
-        let peer = null;
-        let peerAberto = false;
-        let streamAtual = null;
-        let chamadaAtiva = null;
+        const rtcConfig = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' },
+                { urls: 'stun:stun2.l.google.com:19302' }
+            ]
+        };
 
-        // Detecta se o navegador suporta compartilhamento de tela (bloqueado em celulares)
+        let pc = null;
+        let streamAtual = null;
+
         if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
             btn.disabled = true;
             btn.textContent = 'Indisponível em celulares';
             textoStatus.textContent = 'Use em um computador';
-            boxDica.innerHTML = '<strong>Aviso:</strong> Navegadores de celular (iPhone e Android) bloqueiam o compartilhamento de tela por site. Para celular, use o link da <strong>Câmera Móvel</strong>.';
-        } else {
-            iniciarPeer();
+            ponto.className = 'ponto';
+            boxDica.innerHTML = '<strong>Aviso:</strong> Navegadores de celular bloqueiam compartilhamento de tela por site.';
         }
 
-        function iniciarPeer() {
-            peer = new Peer({
-                config: {
-                    iceServers: [
-                        { urls: 'stun:stun.l.google.com:19302' },
-                        { urls: 'stun:stun1.l.google.com:19302' }
-                    ]
-                }
-            });
-
-            peer.on('open', () => {
-                peerAberto = true;
-                if (!chamadaAtiva) {
-                    textoStatus.textContent = 'Pronto para transmitir';
-                    ponto.className = 'ponto pronto';
-                }
-                if (streamAtual && !chamadaAtiva) conectarAoOBS();
-            });
-
-            peer.on('disconnected', () => {
-                peerAberto = false;
-                textoStatus.textContent = 'Reconectando...';
-                ponto.className = 'ponto';
-                peer.reconnect();
-            });
-
-            peer.on('error', (err) => {
-                textoStatus.textContent = 'Erro: ' + err.type;
-                ponto.className = 'ponto';
-            });
-        }
-
-        async function conectarAoOBS() {
-            if (!peerAberto || !streamAtual) return;
-            chamadaAtiva = peer.call(CHAVE_OBS, streamAtual);
-
-            setTimeout(async () => {
-                try {
-                    const sender = chamadaAtiva.peerConnection.getSenders().find(s => s.track && s.track.kind === 'video');
-                    if (sender) {
-                        const params = sender.getParameters();
-                        if (!params.encodings) params.encodings = [{}];
-                        params.encodings[0].maxBitrate = 4000000; // 4 Mbps para textos nítidos na tela
-                        await sender.setParameters(params);
-                    }
-                } catch (e) {}
-            }, 1000);
-
-            textoStatus.textContent = 'NO AR (OBS)';
-            ponto.className = 'ponto no-ar';
-            btn.textContent = '✖ Encerrar Transmissão';
-            btn.classList.add('ao-vivo');
+        async function encerrarTransmissao() {
+            salaRef.child('answer').off();
+            salaRef.child('answerCandidates').off();
+            await salaRef.remove().catch(() => {});
+            if (pc) { pc.close(); pc = null; }
+            if (streamAtual) {
+                streamAtual.getTracks().forEach(t => t.stop());
+                streamAtual = null;
+            }
+            textoStatus.textContent = 'Pronto para transmitir';
+            ponto.className = 'ponto pronto';
+            btn.textContent = '▶ Compartilhar Tela + Áudio';
+            btn.classList.remove('ao-vivo');
         }
 
         btn.onclick = async () => {
             if (streamAtual) {
-                if (chamadaAtiva) chamadaAtiva.close();
-                streamAtual.getTracks().forEach(t => t.stop());
-                window.location.reload();
+                await encerrarTransmissao();
                 return;
             }
 
@@ -163,21 +133,81 @@
                     }
                 });
 
-                // Se o usuário clicar em "Parar compartilhamento" na barra do Chrome
-                streamAtual.getVideoTracks()[0].onended = () => {
-                    if (chamadaAtiva) chamadaAtiva.close();
-                    window.location.reload();
+                streamAtual.getVideoTracks()[0].onended = () => encerrarTransmissao();
+
+                textoStatus.textContent = 'Conectando ao OBS...';
+                ponto.className = 'ponto aguardando';
+                btn.textContent = '✖ Encerrar Transmissão';
+                btn.classList.add('ao-vivo');
+
+                // Limpa sessão anterior no Firebase
+                await salaRef.remove();
+
+                pc = new RTCPeerConnection(rtcConfig);
+
+                streamAtual.getTracks().forEach(track => {
+                    const sender = pc.addTrack(track, streamAtual);
+                    if (track.kind === 'video') {
+                        setTimeout(async () => {
+                            try {
+                                const params = sender.getParameters();
+                                if (!params.encodings) params.encodings = [{}];
+                                params.encodings[0].maxBitrate = 4000000;
+                                await sender.setParameters(params);
+                            } catch (e) {}
+                        }, 1000);
+                    }
+                });
+
+                pc.onicecandidate = (event) => {
+                    if (event.candidate) {
+                        salaRef.child('offerCandidates').push(event.candidate.toJSON());
+                    }
                 };
 
-                if (peerAberto) {
-                    conectarAoOBS();
-                } else {
-                    textoStatus.textContent = 'Tela capturada, aguardando OBS...';
-                }
+                pc.onconnectionstatechange = () => {
+                    if (!pc) return;
+                    if (pc.connectionState === 'connected') {
+                        textoStatus.textContent = 'NO AR (OBS CONECTADO)';
+                        ponto.className = 'ponto no-ar';
+                    } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+                        textoStatus.textContent = 'Conexão perdida com o OBS';
+                        ponto.className = 'ponto aguardando';
+                    }
+                };
+
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                await salaRef.child('offer').set({
+                    type: offer.type,
+                    sdp: offer.sdp,
+                    ts: Date.now()
+                });
+
+                // Aguarda resposta do receptor do OBS
+                salaRef.child('answer').on('value', async (snap) => {
+                    const data = snap.val();
+                    if (data && pc && !pc.currentRemoteDescription) {
+                        await pc.setRemoteDescription(new RTCSessionDescription(data));
+                    }
+                });
+
+                salaRef.child('answerCandidates').on('child_added', async (snap) => {
+                    const candidate = snap.val();
+                    if (candidate && pc) {
+                        try { await pc.addIceCandidate(new RTCIceCandidate(candidate)); } catch (e) {}
+                    }
+                });
+
             } catch (err) {
+                await encerrarTransmissao();
                 textoStatus.textContent = 'Compartilhamento cancelado';
             }
         };
+
+        window.addEventListener('beforeunload', () => {
+            if (streamAtual) salaRef.remove();
+        });
     </script>
 </body>
 </html>
