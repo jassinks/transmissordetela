@@ -71,11 +71,26 @@
         const ponto = document.getElementById('ponto');
         const boxDica = document.getElementById('box-dica');
 
+        // Servidores STUN + TURN públicos para atravessar redes e firewalls externos
         const rtcConfig = {
             iceServers: [
                 { urls: 'stun:stun.l.google.com:19302' },
-                { urls: 'stun:stun1.l.google.com:19302' },
-                { urls: 'stun:stun2.l.google.com:19302' }
+                { urls: 'stun:stun.relay.metered.ca:80' },
+                {
+                    urls: 'turn:openrelay.metered.ca:80',
+                    username: 'openrelayproject',
+                    credential: 'openrelayproject'
+                },
+                {
+                    urls: 'turn:openrelay.metered.ca:443',
+                    username: 'openrelayproject',
+                    credential: 'openrelayproject'
+                },
+                {
+                    urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+                    username: 'openrelayproject',
+                    credential: 'openrelayproject'
+                }
             ]
         };
 
@@ -94,7 +109,7 @@
         function aguardarIce(peerConnection) {
             return new Promise((resolve) => {
                 if (peerConnection.iceGatheringState === 'complete') return resolve();
-                const timeout = setTimeout(resolve, 1800);
+                const timeout = setTimeout(resolve, 4000);
                 peerConnection.onicegatheringstatechange = () => {
                     if (peerConnection.iceGatheringState === 'complete') {
                         clearTimeout(timeout);
@@ -141,7 +156,7 @@
 
                 streamAtual.getVideoTracks()[0].onended = () => encerrarTransmissao();
 
-                textoStatus.textContent = 'Conectando ao OBS...';
+                textoStatus.textContent = 'Buscando rota de rede...';
                 ponto.className = 'ponto aguardando';
                 btn.textContent = '✖ Encerrar Transmissão';
                 btn.classList.add('ao-vivo');
@@ -168,7 +183,7 @@
                         textoStatus.textContent = 'NO AR (OBS CONECTADO)';
                         ponto.className = 'ponto no-ar';
                     } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
-                        textoStatus.textContent = 'Sinal interrompido — tente novamente';
+                        textoStatus.textContent = 'Sinal interrompido — clique para tentar novamente';
                         ponto.className = 'ponto aguardando';
                     }
                 };
@@ -176,6 +191,8 @@
                 const offer = await pc.createOffer();
                 await pc.setLocalDescription(offer);
                 await aguardarIce(pc);
+
+                textoStatus.textContent = 'Aguardando resposta do OBS...';
 
                 const ts = Date.now();
                 await fetch(`${SALA_URL}.json`, {
@@ -191,7 +208,6 @@
                     })
                 });
 
-                // Aguarda a resposta do OBS via HTTPS
                 timerResposta = setInterval(async () => {
                     if (!pc || pc.currentRemoteDescription) {
                         clearInterval(timerResposta);
@@ -204,6 +220,7 @@
                         if (ans && ans.ts === ts && ans.sdp && pc && !pc.currentRemoteDescription) {
                             clearInterval(timerResposta);
                             timerResposta = null;
+                            textoStatus.textContent = 'Fechando conexão de vídeo...';
                             await pc.setRemoteDescription(new RTCSessionDescription({ type: ans.type, sdp: ans.sdp }));
                         }
                     } catch (e) {}
